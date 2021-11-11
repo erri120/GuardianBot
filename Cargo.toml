@@ -1,0 +1,11 @@
+[package]
+name = "guardian_bot"
+version = "0.1.0"
+edition = "2018"
+authors = ["erri120 <erri120@protonmail.com>"]
+
+[dependencies]
+tokio = { version = "1.13.0", features = ["full"] }
+serenity = { version = "0.10.9", default-features = false, features = ["builder", "cache", "collector", "client", "absolute_ratelimits", "rustls_backend", "unstable_discord_api"] }
+ahash = { version = "0.7.6", features = ["std"] }
+anyhow = "1.0.45"

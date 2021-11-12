@@ -1,4 +1,5 @@
 mod guild_settings;
+mod member_details;
 
 use std::{
     collections::{HashMap},
@@ -26,8 +27,10 @@ use serenity::{
     },
     prelude::*,
 };
+use serenity::model::channel::MessageType;
 
 use crate::guild_settings::{ChannelSetting, GuildSettings};
+use crate::member_details::{MemberDetails, MessageInfo};
 
 struct Handler;
 
@@ -35,6 +38,8 @@ impl Handler {
     async fn interaction_create_with_result(&self, ctx: &serenity::prelude::Context, command: &ApplicationCommandInteraction) -> Result<String, anyhow::Error> {
         let guild_id = command.guild_id
             .with_context(|| format!("Interaction {} does not have a guild_id!", command.id.0))?;
+
+        // TODO: permissions
 
         let data_read = ctx.data.read().await;
         let guild_settings_lock = data_read.get::<GuildSettings>()
@@ -81,14 +86,14 @@ impl Handler {
                 Ok("All channels are now included, you can still manually exclude channels you don't want to be monitored".to_string())
             }
         } else if command_name == "exclude_channel" {
-            return if current_guild_settings.include_all_channels {
-                let channel_option = command
-                    .data.options.get(0)
-                    .with_context(|| format!("Unable to get option"))?
-                    .resolved.as_ref()
-                    .with_context(|| format!("Unable to resolve option"))?;
+            let channel_option = command
+                .data.options.get(0)
+                .with_context(|| format!("Unable to get option"))?
+                .resolved.as_ref()
+                .with_context(|| format!("Unable to resolve option"))?;
 
-                return if let ApplicationCommandInteractionDataOptionValue::Channel(channel) = channel_option {
+            return if let ApplicationCommandInteractionDataOptionValue::Channel(channel) = channel_option {
+                return if current_guild_settings.include_all_channels {
                     if current_guild_settings.excluded_channels.iter().any(|i| i.id == channel.id.0) {
                         return Err(anyhow!("The channel '{}' ({}) is already excluded!", channel.name, channel.id.0));
                     } else {
@@ -97,22 +102,38 @@ impl Handler {
 
                     Ok(format!("The channel '{}' ({}) will now be excluded", channel.name, channel.id.0))
                 } else {
-                    Err(anyhow!("Invalid channel!"))
+                    // we are excluding every channel, in this mode the command can remove a channel from the included_channels list
+                    let channel_index = current_guild_settings.included_channels.iter().position(|x| x.id == channel.id.0);
+                    return match channel_index {
+                        Some(i) => {
+                            current_guild_settings.included_channels.remove(i);
+                            Ok(format!("Channel '{}' ({}) has been removed from the included channels list", channel.name, channel.id.0))
+                        },
+                        None => Err(anyhow!("The channel '{}' ({}) has not been included so it can't be excluded!", channel.name, channel.id.0))
+                    }
                 }
             } else {
-                Err(anyhow!("Guild is in exclude-all-channels mode, change the settings to include all channels and call this command again! There is no point in excluding a certain channel if the bot is already excluding everything."))
+                Err(anyhow!("Invalid channel!"))
             }
         } else if command_name == "include_channel" {
-            return if current_guild_settings.include_all_channels {
-                Err(anyhow!("Guild is in include-all-channels mode, change the settings to exclude all channels and call this command again! There is no point in including a certain channel if the bot is already including everything."))
-            } else {
-                let channel_option = command
-                    .data.options.get(0)
-                    .with_context(|| format!("Unable to get option"))?
-                    .resolved.as_ref()
-                    .with_context(|| format!("Unable to resolve option"))?;
+            let channel_option = command
+                .data.options.get(0)
+                .with_context(|| format!("Unable to get option"))?
+                .resolved.as_ref()
+                .with_context(|| format!("Unable to resolve option"))?;
 
-                return if let ApplicationCommandInteractionDataOptionValue::Channel(channel) = channel_option {
+            return if let ApplicationCommandInteractionDataOptionValue::Channel(channel) = channel_option {
+                return if current_guild_settings.include_all_channels {
+                    // we are include every channel, in this mode the command can remove a channel from the excluded_channels list
+                    let channel_index = current_guild_settings.excluded_channels.iter().position(|x| x.id == channel.id.0);
+                    return match channel_index {
+                        Some(i) => {
+                            current_guild_settings.excluded_channels.remove(i);
+                            Ok(format!("Channel '{}' ({}) has been removed from the excluded channels list", channel.name, channel.id.0))
+                        },
+                        None => Err(anyhow!("The channel '{}' ({}) has not been excluded so it can't be included!", channel.name, channel.id.0))
+                    }
+                } else {
                     if current_guild_settings.included_channels.iter().any(|i| i.id == channel.id.0) {
                         return Err(anyhow!("The channel '{}' ({}) is already included!", channel.name, channel.id.0));
                     } else {
@@ -120,9 +141,9 @@ impl Handler {
                     }
 
                     Ok(format!("The channel '{}' ({}) will now be included", channel.name, channel.id.0))
-                } else {
-                    Err(anyhow!("Invalid channel!"))
                 }
+            } else {
+                Err(anyhow!("Invalid channel!"))
             }
         } else {
             Err(anyhow!("Unknown command!"))
@@ -135,43 +156,91 @@ impl Handler {
             return Ok(());
         }
 
+        // InlineReply might also be interesting
+        if new_message.kind != MessageType::Regular {
+            return Ok(());
+        }
+
+        // TODO: cover message that don't at everyone but are still spam (small timeframe)
+        // NOTE: this includes `@everyone` and `@here`
+        // this is fucking stupid: discord reports that the message is not mentioning everyone even if they are because they don't have the perms
+        if new_message.mention_everyone {
+            return Ok(());
+        }
+
+        if !new_message.content.contains("@everyone") && !new_message.content.contains("@here") {
+            return Ok(());
+        }
+
+        // new_message.reply(&ctx.http, format!("You are pinging everyone!")).await
+        //     .with_context(|| format!("Unable to reply to message!"))?;
+
+        // let guild = new_message.guild(&ctx.cache).await
+        //     .with_context(|| format!("Unable to get guild of message {}", new_message.id.0))?;
+
+        // let channel = guild.channels.get(&new_message.channel_id)
+        //     .with_context(|| format!("Unable to get channel of message {}", new_message.id.0))?;
+        //
+        // let member = guild.member(&ctx.http, new_message.author.id).await
+        //     .with_context(|| format!("Unable to get member of message {}", new_message.id.0))?;
+
+        // let guild_permissions = guild.member_permissions(&ctx.http, new_message.author.id).await
+        //     .with_context(|| format!("Unable to get permissions of member '{}' ({})", new_message.author.name, new_message.author.id))?;
+        //
+        // let channel_permissions = guild.user_permissions_in(channel, &member)
+        //     .with_context(|| format!("Unable to get permissions of member in channel"))?;
+
+        // new_message.reply(&ctx.http, format!("Guild: {:#?} ({}) | Channel: {:#?} ({})", guild_permissions, guild_permissions.mention_everyone(), channel_permissions, channel_permissions.mention_everyone())).await
+        //     .with_context(|| format!("Unable to reply to message!"))?;
+
+        // TODO: maybe handle accounts with permission getting hacked? Not sure about this one yet.
+        // if permissions.mention_everyone() {
+        //     return Ok(())
+        // }
+
         let guild_id = new_message.guild_id
-            .with_context(|| format!("Message {} does not have a guild_id!", new_message.id.0))?;
+            .with_context(|| format!("Unable to get GuildId from message!"))?;
 
         let data_read = ctx.data.read().await;
+
+        // getting the current guild settings
         let guild_settings_lock = data_read.get::<GuildSettings>()
             .with_context(|| format!("Unable to get GuildSettings from TypeMap!"))?
             .clone();
 
+        // guild settings with shared read access
         let guild_settings = guild_settings_lock.read().await;
         let current_guild_settings = guild_settings.get(&guild_id.0)
             .with_context(|| format!("Unable to find Guild {} in HashMap!", guild_id.0))?;
 
-        if !current_guild_settings.active {
-            return Ok(());
+        // getting the current member info
+        let member_details_lock = data_read.get::<MemberDetails>()
+            .with_context(|| format!("Unable to get MemberDetails from TypeMap!"))?
+            .clone();
+
+        let should_ban;
+        {
+            // member info with exclusive write access
+            let mut member_details = member_details_lock.write().await;
+            let current_member_info = member_details.entry(new_message.author.id.0).or_default();
+
+            // add current mention message to vector
+            current_member_info.last_mentions.push(MessageInfo::from(new_message));
+
+            // ban user
+            should_ban = current_member_info.last_mentions.len() >= current_guild_settings.max_repeats as usize;
         }
 
-        let channel = new_message.channel_id.to_channel(&ctx.http).await
-            .with_context(|| format!("Unable to get channel of message {}", new_message.id.0))?;
+        if should_ban {
+            // TODO: actually ban the user
+            new_message.reply_mention(&ctx.http, format!("has reached the limit and will be banned for spamming.")).await
+                .with_context(|| format!("Unable to reply to message!"))?;
 
-        // TODO: categories are also channels, need to somehow check if the channel is in a category which we include/exclude
-
-        if current_guild_settings.include_all_channels {
-            // we are included all channels and have check if we exclude the current one
-            if current_guild_settings.excluded_channels.iter().any(|i| i.id == channel.id().0) {
-                return Ok(());
-            }
-
-            new_message.reply_mention(&ctx.http, format!("include all channels -> not excluded")).await
-                .with_context(|| format!("Unable to reply to message {}", new_message.id.0))?;
+            guild_id.ban_with_reason(&ctx.http, new_message.author.id, 4, format!("Guardian Ban: Spamming")).await
+                .with_context(|| format!("Unable to ban user!"))?;
         } else {
-            // we are excluding all channels and have to check if we are including the current one
-            if current_guild_settings.included_channels.iter().any(|i| i.id == channel.id().0) {
-                new_message.reply_mention(&ctx.http, format!("exclude all channels -> included")).await
-                    .with_context(|| format!("Unable to reply to message {}", new_message.id.0))?;
-            } else {
-                return Ok(());
-            }
+            new_message.reply_ping(&ctx.http, format!("You do not have the permission to mention everyone and will be banned if you continue.")).await
+                .with_context(|| format!("Unable to reply to message!"))?;
         }
 
         Ok(())
@@ -180,12 +249,20 @@ impl Handler {
 
 #[async_trait]
 impl EventHandler for Handler {
-    async fn guild_create(&self, _ctx: serenity::prelude::Context, guild: Guild, is_new: bool) {
+    async fn guild_create(&self, ctx: serenity::prelude::Context, guild: Guild, is_new: bool) {
         if is_new {
             println!("Bot got added to Guild '{}' ({})", guild.name, guild.id.0);
         } else {
             println!("Bot connected to Guild '{}' ({})", guild.name, guild.id.0);
         }
+
+        let data_read = ctx.data.read().await;
+        let guild_settings_lock = data_read.get::<GuildSettings>()
+            .expect("Unable to get GuildSettings from TypeMap!")
+            .clone();
+
+        let mut guild_settings = guild_settings_lock.write().await;
+        let _ = guild_settings.entry(guild.id.0).or_default();
     }
 
     async fn message(&self, ctx: serenity::client::Context, new_message: Message) {
@@ -310,6 +387,7 @@ async fn main() {
     {
         let mut data = client.data.write().await;
         data.insert::<GuildSettings>(Arc::new(RwLock::new(HashMap::default())));
+        data.insert::<MemberDetails>(Arc::new(RwLock::new(HashMap::default())));
     }
 
     if let Err(why) = client.start().await {

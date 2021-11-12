@@ -42,11 +42,12 @@ impl Default for GuildSetting {
 
 impl GuildSetting {
     pub fn reset(&mut self) {
-        self.active = false;
-        self.max_repeats = 3;
-        self.include_all_channels = true;
-        self.excluded_channels = Vec::new();
-        self.included_channels = Vec::new();
+        let default = GuildSetting::default();
+        self.active = default.active;
+        self.max_repeats = default.max_repeats;
+        self.include_all_channels = default.include_all_channels;
+        self.excluded_channels = default.excluded_channels;
+        self.included_channels = default.included_channels;
     }
 }
 

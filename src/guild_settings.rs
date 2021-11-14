@@ -19,7 +19,8 @@ pub struct GuildSetting {
     pub max_repeats: i32,
     pub include_all_channels: bool,
     pub excluded_channels: Vec<ChannelSetting>,
-    pub included_channels: Vec<ChannelSetting>
+    pub included_channels: Vec<ChannelSetting>,
+    pub log_channel: Option<u64>
 }
 
 #[derive(Debug)]
@@ -35,7 +36,8 @@ impl Default for GuildSetting {
             max_repeats: 3,
             include_all_channels: true,
             excluded_channels: Vec::new(),
-            included_channels: Vec::new()
+            included_channels: Vec::new(),
+            log_channel: None
         }
     }
 }
@@ -48,6 +50,7 @@ impl GuildSetting {
         self.include_all_channels = default.include_all_channels;
         self.excluded_channels = default.excluded_channels;
         self.included_channels = default.included_channels;
+        self.log_channel = default.log_channel;
     }
 
     pub fn should_ignore_channel(&self, id: u64) -> bool {

@@ -13,7 +13,10 @@ use serenity::{
     async_trait,
     model::{
         gateway::Ready,
-        id::GuildId,
+        id::{
+            GuildId,
+            ChannelId
+        },
         interactions::{
             application_command::{
                 ApplicationCommandInteraction,
@@ -24,18 +27,14 @@ use serenity::{
             InteractionResponseType,
         },
         guild::Guild,
-        channel::Message
+        channel::{
+            Message,
+            MessageType,
+            GuildChannel
+        }
     },
     prelude::*,
 };
-use serenity::client::bridge::gateway::event::ShardStageUpdateEvent;
-use serenity::model::channel::{Channel, ChannelCategory, GuildChannel, MessageType, PartialGuildChannel, Reaction, StageInstance};
-use serenity::model::event::{ChannelPinsUpdateEvent, GuildMembersChunkEvent, GuildMemberUpdateEvent, InviteCreateEvent, InviteDeleteEvent, MessageUpdateEvent, PresenceUpdateEvent, ResumedEvent, ThreadListSyncEvent, ThreadMembersUpdateEvent, TypingStartEvent, VoiceServerUpdateEvent};
-use serenity::model::gateway::Presence;
-use serenity::model::guild::{Emoji, GuildUnavailable, Integration, Member, PartialGuild, Role, ThreadMember};
-use serenity::model::id::{ApplicationId, ChannelId, EmojiId, IntegrationId, MessageId, RoleId};
-use serenity::model::interactions::application_command::ApplicationCommand;
-use serenity::model::prelude::{CurrentUser, User, VoiceState};
 
 use crate::guild_settings::{ChannelSetting, GuildSettings};
 use crate::member_details::{MemberDetails, MessageInfo};
@@ -104,21 +103,21 @@ impl Handler {
             return if let ApplicationCommandInteractionDataOptionValue::Channel(channel) = channel_option {
                 return if current_guild_settings.include_all_channels {
                     if current_guild_settings.excluded_channels.iter().any(|i| i.id == channel.id.0) {
-                        return Err(anyhow!("The channel '{}' ({}) is already excluded!", channel.name, channel.id.0));
+                        return Err(anyhow!("The channel <#{}> ({}) is already excluded!", channel.id.0, channel.id.0));
                     } else {
                         current_guild_settings.excluded_channels.push(ChannelSetting::from(channel));
                     }
 
-                    Ok(format!("The channel '{}' ({}) will now be excluded", channel.name, channel.id.0))
+                    Ok(format!("The channel <#{}> ({}) will now be excluded", channel.id.0, channel.id.0))
                 } else {
                     // we are excluding every channel, in this mode the command can remove a channel from the included_channels list
                     let channel_index = current_guild_settings.included_channels.iter().position(|x| x.id == channel.id.0);
                     return match channel_index {
                         Some(i) => {
                             current_guild_settings.included_channels.remove(i);
-                            Ok(format!("Channel '{}' ({}) has been removed from the included channels list", channel.name, channel.id.0))
+                            Ok(format!("Channel <#{}> ({}) has been removed from the included channels list", channel.id.0, channel.id.0))
                         },
-                        None => Err(anyhow!("The channel '{}' ({}) has not been included so it can't be excluded!", channel.name, channel.id.0))
+                        None => Err(anyhow!("The channel <#{}> ({}) has not been included so it can't be excluded!", channel.id.0, channel.id.0))
                     }
                 }
             } else {
@@ -138,19 +137,32 @@ impl Handler {
                     return match channel_index {
                         Some(i) => {
                             current_guild_settings.excluded_channels.remove(i);
-                            Ok(format!("Channel '{}' ({}) has been removed from the excluded channels list", channel.name, channel.id.0))
+                            Ok(format!("Channel <#{}> ({}) has been removed from the excluded channels list", channel.id.0, channel.id.0))
                         },
-                        None => Err(anyhow!("The channel '{}' ({}) has not been excluded so it can't be included!", channel.name, channel.id.0))
+                        None => Err(anyhow!("The channel <#{}> ({}) has not been excluded so it can't be included!", channel.id.0, channel.id.0))
                     }
                 } else {
                     if current_guild_settings.included_channels.iter().any(|i| i.id == channel.id.0) {
-                        return Err(anyhow!("The channel '{}' ({}) is already included!", channel.name, channel.id.0));
+                        return Err(anyhow!("The channel <#{}> ({}) is already included!", channel.id.0, channel.id.0));
                     } else {
                         current_guild_settings.included_channels.push(ChannelSetting::from(channel));
                     }
 
-                    Ok(format!("The channel '{}' ({}) will now be included", channel.name, channel.id.0))
+                    Ok(format!("The channel <#{}> ({}) will now be included", channel.id.0, channel.id.0))
                 }
+            } else {
+                Err(anyhow!("Invalid channel!"))
+            }
+        } else if command_name == "set_log_channel" {
+            let channel_option = command
+                .data.options.get(0)
+                .with_context(|| format!("Unable to get option"))?
+                .resolved.as_ref()
+                .with_context(|| format!("Unable to resolve option"))?;
+
+            return if let ApplicationCommandInteractionDataOptionValue::Channel(channel) = channel_option {
+                current_guild_settings.log_channel = Some(channel.id.0);
+                Ok(format!("The channel <#{}> ({}) is now the log channel of this guild", channel.id.0, channel.id.0))
             } else {
                 Err(anyhow!("Invalid channel!"))
             }
@@ -175,9 +187,9 @@ impl Handler {
         // this means we have to rely on checking the contents of the message
 
         // still doing this check because this is true when the user has permissions for it
-        if new_message.mention_everyone {
-            return Ok(());
-        }
+        // if new_message.mention_everyone {
+        //     return Ok(());
+        // }
 
         // TODO: cover message that don't at everyone but are still spam (small timeframe)
         if !is_mentioning_everyone(&new_message.content) {
@@ -242,9 +254,31 @@ impl Handler {
 
             guild_id.ban_with_reason(&ctx.http, new_message.author.id, 1, format!("Guardian Ban: Spamming")).await
                 .with_context(|| format!("Unable to ban user!"))?;
+
+            match current_guild_settings.log_channel {
+                Some(log_channel) => {
+                    let log_channel = guild.channels.get(&ChannelId(log_channel))
+                        .with_context(|| format!("Unable to get log channel {}", log_channel))?;
+
+                    log_channel.say(&ctx.http, format!("The user <@{}> ({}) has been banned for spamming.", new_message.author.id.0, new_message.author.id.0)).await
+                        .with_context(|| format!("Unable to send message to log channel {}", log_channel))?;
+                },
+                _ => {}
+            }
         } else {
             new_message.reply_ping(&ctx.http, format!("You do not have the permission to mention everyone and will be banned if you continue.")).await
                 .with_context(|| format!("Unable to reply to message!"))?;
+
+            match current_guild_settings.log_channel {
+                Some(log_channel) => {
+                    let log_channel = guild.channels.get(&ChannelId(log_channel))
+                        .with_context(|| format!("Unable to get log channel {}", log_channel))?;
+
+                    log_channel.say(&ctx.http, format!("The user <@{}> ({}) has sent a message mentioning everyone/here without permissions in channel <#{}>:\n```txt\n{}```", new_message.author.id.0, new_message.author.id.0, channel.id.0, new_message.content)).await
+                        .with_context(|| format!("Unable to send message to log channel {}", log_channel))?;
+                },
+                _ => {}
+            }
         }
 
         Ok(())
@@ -260,6 +294,16 @@ impl Handler {
         let mut guild_settings = guild_settings_lock.write().await;
         let mut current_guild_settings = guild_settings.get_mut(&channel.guild_id.0)
             .with_context(|| format!("Unable to find Guild {} in HashMap!", channel.guild_id.0))?;
+
+        match current_guild_settings.log_channel {
+            Some(log_channel) => {
+                if log_channel == channel.id.0 {
+                    println!("Log channel {} got removed in guild {}", channel.id.0, channel.guild_id.0);
+                    current_guild_settings.log_channel = None;
+                }
+            }
+            _ => {}
+        }
 
         let included_channel_index = current_guild_settings.included_channels.iter().position(|x| x.id == channel.id.0);
         match included_channel_index {
@@ -372,6 +416,20 @@ impl EventHandler for Handler {
                         option
                             .name("channel")
                             .description("The channel to include")
+                            .kind(ApplicationCommandOptionType::Channel)
+                            .required(true)
+                    })
+            }).await.unwrap();
+
+        let _set_log_channel_command = test_guild
+            .create_application_command(&ctx.http, |command| {
+                command
+                    .name("set_log_channel")
+                    .description("Sets the log channel containing the reports")
+                    .create_option(|option| {
+                        option
+                            .name("channel")
+                            .description("The log channel")
                             .kind(ApplicationCommandOptionType::Channel)
                             .required(true)
                     })

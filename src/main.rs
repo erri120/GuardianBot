@@ -1,5 +1,6 @@
 mod guild_settings;
 mod member_details;
+mod message_utils;
 
 use std::{
     collections::{HashMap},
@@ -27,10 +28,18 @@ use serenity::{
     },
     prelude::*,
 };
-use serenity::model::channel::MessageType;
+use serenity::client::bridge::gateway::event::ShardStageUpdateEvent;
+use serenity::model::channel::{Channel, ChannelCategory, GuildChannel, MessageType, PartialGuildChannel, Reaction, StageInstance};
+use serenity::model::event::{ChannelPinsUpdateEvent, GuildMembersChunkEvent, GuildMemberUpdateEvent, InviteCreateEvent, InviteDeleteEvent, MessageUpdateEvent, PresenceUpdateEvent, ResumedEvent, ThreadListSyncEvent, ThreadMembersUpdateEvent, TypingStartEvent, VoiceServerUpdateEvent};
+use serenity::model::gateway::Presence;
+use serenity::model::guild::{Emoji, GuildUnavailable, Integration, Member, PartialGuild, Role, ThreadMember};
+use serenity::model::id::{ApplicationId, ChannelId, EmojiId, IntegrationId, MessageId, RoleId};
+use serenity::model::interactions::application_command::ApplicationCommand;
+use serenity::model::prelude::{CurrentUser, User, VoiceState};
 
 use crate::guild_settings::{ChannelSetting, GuildSettings};
 use crate::member_details::{MemberDetails, MessageInfo};
+use crate::message_utils::is_mentioning_everyone;
 
 struct Handler;
 
@@ -156,51 +165,30 @@ impl Handler {
             return Ok(());
         }
 
-        // InlineReply might also be interesting
-        if new_message.kind != MessageType::Regular {
+        if new_message.kind != MessageType::Regular && new_message.kind != MessageType::InlineReply {
             return Ok(());
         }
 
-        // TODO: cover message that don't at everyone but are still spam (small timeframe)
-        // NOTE: this includes `@everyone` and `@here`
-        // this is fucking stupid: discord reports that the message is not mentioning everyone even if they are because they don't have the perms
+        // NOTE: new_message.mention_everyone which is returned by the Discord API is false
+        // when the user does an @everyone but does not have the permissions for it.
+        // All other mention* fields are also empty or false.
+        // this means we have to rely on checking the contents of the message
+
+        // still doing this check because this is true when the user has permissions for it
         if new_message.mention_everyone {
             return Ok(());
         }
 
-        if !new_message.content.contains("@everyone") && !new_message.content.contains("@here") {
+        // TODO: cover message that don't at everyone but are still spam (small timeframe)
+        if !is_mentioning_everyone(&new_message.content) {
             return Ok(());
         }
 
-        // new_message.reply(&ctx.http, format!("You are pinging everyone!")).await
-        //     .with_context(|| format!("Unable to reply to message!"))?;
+        let guild = new_message.guild(&ctx.cache).await
+            .with_context(|| format!("Unable to get guild of message {}", new_message.id.0))?;
+        let guild_id = guild.id;
 
-        // let guild = new_message.guild(&ctx.cache).await
-        //     .with_context(|| format!("Unable to get guild of message {}", new_message.id.0))?;
-
-        // let channel = guild.channels.get(&new_message.channel_id)
-        //     .with_context(|| format!("Unable to get channel of message {}", new_message.id.0))?;
-        //
-        // let member = guild.member(&ctx.http, new_message.author.id).await
-        //     .with_context(|| format!("Unable to get member of message {}", new_message.id.0))?;
-
-        // let guild_permissions = guild.member_permissions(&ctx.http, new_message.author.id).await
-        //     .with_context(|| format!("Unable to get permissions of member '{}' ({})", new_message.author.name, new_message.author.id))?;
-        //
-        // let channel_permissions = guild.user_permissions_in(channel, &member)
-        //     .with_context(|| format!("Unable to get permissions of member in channel"))?;
-
-        // new_message.reply(&ctx.http, format!("Guild: {:#?} ({}) | Channel: {:#?} ({})", guild_permissions, guild_permissions.mention_everyone(), channel_permissions, channel_permissions.mention_everyone())).await
-        //     .with_context(|| format!("Unable to reply to message!"))?;
-
-        // TODO: maybe handle accounts with permission getting hacked? Not sure about this one yet.
-        // if permissions.mention_everyone() {
-        //     return Ok(())
-        // }
-
-        let guild_id = new_message.guild_id
-            .with_context(|| format!("Unable to get GuildId from message!"))?;
-
+        // accessing global data
         let data_read = ctx.data.read().await;
 
         // getting the current guild settings
@@ -212,6 +200,22 @@ impl Handler {
         let guild_settings = guild_settings_lock.read().await;
         let current_guild_settings = guild_settings.get(&guild_id.0)
             .with_context(|| format!("Unable to find Guild {} in HashMap!", guild_id.0))?;
+
+        if !current_guild_settings.active {
+            return Ok(());
+        }
+
+        let channel = guild.channels.get(&new_message.channel_id)
+            .with_context(|| format!("Unable to get channel of message {}", new_message.id.0))?;
+
+        let ignore_channel = match channel.category_id {
+            Some(category) => current_guild_settings.should_ignore_channel(category.0) || current_guild_settings.should_ignore_channel(channel.id.0),
+            None => current_guild_settings.should_ignore_channel(channel.id.0)
+        };
+
+        if ignore_channel {
+            return Ok(());
+        }
 
         // getting the current member info
         let member_details_lock = data_read.get::<MemberDetails>()
@@ -232,11 +236,11 @@ impl Handler {
         }
 
         if should_ban {
-            // TODO: actually ban the user
+            // TODO: cross-server ban
             new_message.reply_mention(&ctx.http, format!("has reached the limit and will be banned for spamming.")).await
                 .with_context(|| format!("Unable to reply to message!"))?;
 
-            guild_id.ban_with_reason(&ctx.http, new_message.author.id, 4, format!("Guardian Ban: Spamming")).await
+            guild_id.ban_with_reason(&ctx.http, new_message.author.id, 1, format!("Guardian Ban: Spamming")).await
                 .with_context(|| format!("Unable to ban user!"))?;
         } else {
             new_message.reply_ping(&ctx.http, format!("You do not have the permission to mention everyone and will be banned if you continue.")).await
@@ -245,10 +249,49 @@ impl Handler {
 
         Ok(())
     }
+
+    async fn channel_delete_with_result(&self, ctx: &serenity::client::Context, channel: &GuildChannel) -> Result<(), anyhow::Error> {
+        let data_read = ctx.data.read().await;
+
+        let guild_settings_lock = data_read.get::<GuildSettings>()
+            .with_context(|| format!("Unable to get GuildSettings from TypeMap!"))?
+            .clone();
+
+        let mut guild_settings = guild_settings_lock.write().await;
+        let mut current_guild_settings = guild_settings.get_mut(&channel.guild_id.0)
+            .with_context(|| format!("Unable to find Guild {} in HashMap!", channel.guild_id.0))?;
+
+        let included_channel_index = current_guild_settings.included_channels.iter().position(|x| x.id == channel.id.0);
+        match included_channel_index {
+            Some(i) => {
+                println!("Removing channel {} from included_channels vec of guild {}", channel.id.0, channel.guild_id.0);
+                current_guild_settings.included_channels.remove(i);
+            },
+            _ => {}
+        }
+
+        let excluded_channel_index = current_guild_settings.excluded_channels.iter().position(|x| x.id == channel.id.0);
+        match excluded_channel_index {
+            Some(i) => {
+                println!("Removing channel {} from excluded_channels vec of guild {}", channel.id.0, channel.guild_id.0);
+                current_guild_settings.excluded_channels.remove(i);
+            },
+            _ => {}
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl EventHandler for Handler {
+    async fn channel_delete(&self, ctx: serenity::client::Context, channel: &GuildChannel) {
+        match self.channel_delete_with_result(&ctx, channel).await {
+            Ok(()) => return,
+            Err(why) => println!("{}", why)
+        }
+    }
+
     async fn guild_create(&self, ctx: serenity::prelude::Context, guild: Guild, is_new: bool) {
         if is_new {
             println!("Bot got added to Guild '{}' ({})", guild.name, guild.id.0);

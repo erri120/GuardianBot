@@ -49,6 +49,22 @@ impl GuildSetting {
         self.excluded_channels = default.excluded_channels;
         self.included_channels = default.included_channels;
     }
+
+    pub fn should_ignore_channel(&self, id: u64) -> bool {
+        if self.include_all_channels {
+            // return if we are excluding the current channel in include-all mode
+            if self.excluded_channels.iter().any(|x| x.id == id) {
+                return true;
+            }
+        } else {
+            // return if we are not including the current channel in exclude-all mode
+            if !self.included_channels.iter().any(|x| x.id == id) {
+                return true;
+            }
+        }
+
+        return false;
+    }
 }
 
 impl From<&PartialChannel> for ChannelSetting {

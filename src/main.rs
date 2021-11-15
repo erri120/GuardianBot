@@ -1,6 +1,7 @@
 mod guild_settings;
 mod member_details;
 mod message_utils;
+mod commands;
 
 use std::{
     collections::{HashMap},
@@ -19,9 +20,9 @@ use serenity::{
         },
         interactions::{
             application_command::{
+                ApplicationCommand,
                 ApplicationCommandInteraction,
-                ApplicationCommandInteractionDataOptionValue,
-                ApplicationCommandOptionType,
+                ApplicationCommandInteractionDataOptionValue
             },
             Interaction,
             InteractionResponseType,
@@ -35,6 +36,7 @@ use serenity::{
     },
     prelude::*,
 };
+use crate::commands::create_commands;
 
 use crate::guild_settings::{ChannelSetting, GuildSettings};
 use crate::member_details::{MemberDetails, MessageInfo};
@@ -47,7 +49,19 @@ impl Handler {
         let guild_id = command.guild_id
             .with_context(|| format!("Interaction {} does not have a guild_id!", command.id.0))?;
 
-        // TODO: permissions
+        let guild = guild_id.to_guild_cached(&ctx.cache).await
+            .with_context(|| format!("Unable to get guild {}", guild_id))?;
+
+        let member = command.member.as_ref()
+            .with_context(|| format!("Interaction {} does not have a member!", command.id.0))?;
+
+        let permissions = guild.member_permissions(&ctx.http, member.user.id).await
+            .with_context(|| format!("Unable to get permissions of member '{}' ({}) in guild '{}' ({})", member.user.name, member.user.id, guild.name, guild.id.0))?;
+
+        if !permissions.administrator() {
+            // TODO: report this
+            return Ok("You do not have permissions to use this command!".to_string());
+        }
 
         let data_read = ctx.data.read().await;
         let guild_settings_lock = data_read.get::<GuildSettings>()
@@ -61,6 +75,7 @@ impl Handler {
         let current_guild_settings = guild_settings.entry(guild_id.0).or_default();
 
         // TODO: cleanup, also: https://github.com/serenity-rs/serenity/issues/1462
+        // TODO: report changes
         let command_name = command.data.name.as_str();
         if command_name == "reset" {
             current_guild_settings.reset();
@@ -362,87 +377,20 @@ impl EventHandler for Handler {
     async fn ready(&self, ctx: serenity::prelude::Context, ready: Ready) {
         println!("{} is connected!", ready.user.name);
 
-        let test_guild = GuildId(908309641828663297);
+        let test_guild_id = std::env::var("GUILD_ID");
+        match test_guild_id {
+            Ok(x) => {
+                let test_guild_id: u64 = x.parse().expect("Unable to parse environment variable \"GUILD_ID\" as u64!");
+                let test_guild = GuildId(test_guild_id);
 
-        let _reset_command = test_guild
-            .create_application_command(&ctx.http, |command| {
-                command.name("reset").description("Resets all settings for this Guild to their default values")
-            }).await.unwrap();
-
-        let _activate_command = test_guild
-            .create_application_command(&ctx.http, |command| {
-                command.name("activate").description("Activates the bot for this Guild")
-            }).await.unwrap();
-
-        let _deactivate_command = test_guild
-            .create_application_command(&ctx.http, |command| {
-                command.name("deactivate").description("Deactivates the bot for this Guild")
-            }).await.unwrap();
-
-        let _exclude_all_channels_command = test_guild
-            .create_application_command(&ctx.http, |command| {
-                command
-                    .name("exclude_all")
-                    .description("Excludes all channels, only channels that you include will be monitored")
-            }).await.unwrap();
-
-        let _include_all_channels_command = test_guild
-            .create_application_command(&ctx.http, |command| {
-                command
-                    .name("include_all")
-                    .description("Includes all channels, you can still manually exclude channels")
-            }).await.unwrap();
-
-        let _exclude_channel_command = GuildId(908309641828663297)
-            .create_application_command(&ctx.http, |command| {
-                command
-                    .name("exclude_channel")
-                    .description("Exclude a channel of monitoring")
-                    .create_option(|option| {
-                        option
-                            .name("channel")
-                            .description("The channel to exclude")
-                            .kind(ApplicationCommandOptionType::Channel)
-                            .required(true)
-                    })
-            }).await.unwrap();
-
-        let _include_channel_command = test_guild
-            .create_application_command(&ctx.http, |command| {
-                command
-                    .name("include_channel")
-                    .description("Includes a channel for monitoring")
-                    .create_option(|option| {
-                        option
-                            .name("channel")
-                            .description("The channel to include")
-                            .kind(ApplicationCommandOptionType::Channel)
-                            .required(true)
-                    })
-            }).await.unwrap();
-
-        let _set_log_channel_command = test_guild
-            .create_application_command(&ctx.http, |command| {
-                command
-                    .name("set_log_channel")
-                    .description("Sets the log channel containing the reports")
-                    .create_option(|option| {
-                        option
-                            .name("channel")
-                            .description("The log channel")
-                            .kind(ApplicationCommandOptionType::Channel)
-                            .required(true)
-                    })
-            }).await.unwrap();
-
-        // TODO: global, Discord has a 1 hour cache so it's better to use guild specific commands for testing
-        // let commands = ApplicationCommand::set_global_application_commands(&ctx.http, |commands| {
-        //     commands
-        //         .create_application_command(|command| {
-        //             command.name("ping").description("A ping command")
-        //         })
-        // }).await.expect("Unable to create application commands!");
-        // println!("I now have the following global slash commands: {:#?}", commands);
+                println!("Creating commands for guild {}", test_guild_id);
+                test_guild.set_application_commands(&ctx.http, create_commands).await.unwrap();
+            },
+            Err(_) => {
+                println!("Creating global commands");
+                ApplicationCommand::set_global_application_commands(&ctx.http, create_commands).await.unwrap();
+            }
+        }
     }
 
     async fn interaction_create(&self, ctx: serenity::prelude::Context, interaction: Interaction) {
@@ -473,12 +421,13 @@ impl EventHandler for Handler {
 
 #[tokio::main]
 async fn main() {
-    let token = std::env::var("DISCORD_TOKEN").expect("Expected a token in the environment!");
+    let token = std::env::var("DISCORD_TOKEN")
+        .expect("Missing environment variable: \"DISCORD_TOKEN\"");
 
     let application_id: u64 = std::env::var("APPLICATION_ID")
-        .expect("Expected an application id in the environment!")
+        .expect("Missing environment variable: \"APPLICATION_ID\"")
         .parse()
-        .expect("Unable to parse the provided application id in the environment as a u64!");
+        .expect("Unable to parse environment variable \"APPLICATION_ID\" as u64!");
 
     let mut client = Client::builder(&token)
         .event_handler(Handler)

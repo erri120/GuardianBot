@@ -187,9 +187,9 @@ impl Handler {
         // this means we have to rely on checking the contents of the message
 
         // still doing this check because this is true when the user has permissions for it
-        // if new_message.mention_everyone {
-        //     return Ok(());
-        // }
+        if new_message.mention_everyone {
+            return Ok(());
+        }
 
         // TODO: cover message that don't at everyone but are still spam (small timeframe)
         if !is_mentioning_everyone(&new_message.content) {

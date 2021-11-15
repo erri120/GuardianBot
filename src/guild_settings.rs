@@ -2,9 +2,17 @@ use std::{
     collections::HashMap,
     sync::{Arc},
 };
+
 use ahash::{RandomState};
-use serenity::model::channel::{ChannelType, PartialChannel};
+use anyhow::Context;
 use tokio::sync::RwLock;
+
+use serenity::model::{
+    channel::{ChannelType, PartialChannel},
+    guild::Guild,
+    id::ChannelId
+};
+use serenity::http::Http;
 use serenity::prelude::TypeMapKey;
 
 pub struct GuildSettings;
@@ -67,6 +75,21 @@ impl GuildSetting {
         }
 
         return false;
+    }
+
+    pub async fn send_log_message(&self, http: impl AsRef<Http>, guild: &Guild, message: String) -> Result<(), anyhow::Error> {
+        match self.log_channel {
+            Some(log_channel) => {
+                let log_channel = guild.channels.get(&ChannelId(log_channel))
+                    .with_context(|| format!("Unable to get log channel {}", log_channel))?;
+
+                log_channel.say(http, message).await
+                    .with_context(|| format!("Unable to send message to log channel {}", log_channel))?;
+            },
+            _ => {}
+        }
+
+        return Ok(())
     }
 }
 

@@ -1,7 +1,7 @@
 mod guild_settings;
 mod member_details;
-mod message_utils;
 mod commands;
+mod message_handler;
 
 use std::{
     collections::{HashMap},
@@ -15,8 +15,7 @@ use serenity::{
     model::{
         gateway::Ready,
         id::{
-            GuildId,
-            ChannelId
+            GuildId
         },
         interactions::{
             application_command::{
@@ -40,7 +39,7 @@ use crate::commands::create_commands;
 
 use crate::guild_settings::{ChannelSetting, GuildSettings};
 use crate::member_details::{MemberDetails, MessageInfo};
-use crate::message_utils::is_mentioning_everyone;
+use crate::message_handler::is_spam;
 
 struct Handler;
 
@@ -196,18 +195,13 @@ impl Handler {
             return Ok(());
         }
 
-        // NOTE: new_message.mention_everyone which is returned by the Discord API is false
-        // when the user does an @everyone but does not have the permissions for it.
-        // All other mention* fields are also empty or false.
-        // this means we have to rely on checking the contents of the message
+        // TODO: figure out the best order for this
+        // should this check if the message is spam or if the guild settings are valid (active & channel is monitored)?
+        // in theory this bot shouldn't get messages from guilds that are not active, no point in having a deactivated bot
+        // so that check might is not important and could go last as it it least likely to be false
+        // this leaves checking if the message is spam and if the channel is included or not
 
-        // still doing this check because this is true when the user has permissions for it
-        if new_message.mention_everyone {
-            return Ok(());
-        }
-
-        // TODO: cover message that don't at everyone but are still spam (small timeframe)
-        if !is_mentioning_everyone(&new_message.content) {
+        if !is_spam(new_message) {
             return Ok(());
         }
 
@@ -270,30 +264,12 @@ impl Handler {
             guild_id.ban_with_reason(&ctx.http, new_message.author.id, 1, format!("Guardian Ban: Spamming")).await
                 .with_context(|| format!("Unable to ban user!"))?;
 
-            match current_guild_settings.log_channel {
-                Some(log_channel) => {
-                    let log_channel = guild.channels.get(&ChannelId(log_channel))
-                        .with_context(|| format!("Unable to get log channel {}", log_channel))?;
-
-                    log_channel.say(&ctx.http, format!("The user <@{}> ({}) has been banned for spamming.", new_message.author.id.0, new_message.author.id.0)).await
-                        .with_context(|| format!("Unable to send message to log channel {}", log_channel))?;
-                },
-                _ => {}
-            }
+            current_guild_settings.send_log_message(&ctx.http, &guild, format!("The user <@{}> ({}) has been banned for spamming.", new_message.author.id.0, new_message.author.id.0)).await?;
         } else {
             new_message.reply_ping(&ctx.http, format!("You do not have the permission to mention everyone and will be banned if you continue.")).await
                 .with_context(|| format!("Unable to reply to message!"))?;
 
-            match current_guild_settings.log_channel {
-                Some(log_channel) => {
-                    let log_channel = guild.channels.get(&ChannelId(log_channel))
-                        .with_context(|| format!("Unable to get log channel {}", log_channel))?;
-
-                    log_channel.say(&ctx.http, format!("The user <@{}> ({}) has sent a message mentioning everyone/here without permissions in channel <#{}>:\n```txt\n{}```", new_message.author.id.0, new_message.author.id.0, channel.id.0, new_message.content)).await
-                        .with_context(|| format!("Unable to send message to log channel {}", log_channel))?;
-                },
-                _ => {}
-            }
+            current_guild_settings.send_log_message(&ctx.http, &guild, format!("The user <@{}> ({}) has sent a message mentioning everyone without permissions in channel <#{}>:\n```txt\n{}```", new_message.author.id.0, new_message.author.id.0, channel.id.0, new_message.content)).await?;
         }
 
         Ok(())

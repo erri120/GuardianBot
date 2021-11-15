@@ -1,27 +1,25 @@
 // use chumsky::prelude::*;
 // use chumsky::text::*;
 
-pub fn is_mentioning_everyone(content: &String) -> bool {
-    return content.contains("@everyone") || content.contains("@here");
+// Discord will ping everyone unless the mention is inside a code block
+// below are my tests on writing a markdown parser using chumsky but it's not worth doing
+// all that works just to cover this rare edge case...
 
-    // Discord will ping everyone unless the mention is inside a code block
-    // below are my tests on writing a markdown parser using chumsky but it's not worth doing
-    // all that works just to cover this rare edge case...
-
-    // // fast exit so we don't have to parse the entire thing
-    // if !content.contains("@everyone") && !content.contains("@here") {
-    //     return false;
-    // }
-    //
-    // let tokens = parse_discord_markdown(content);
-    // for token in tokens {
-    //     if let DiscordMarkdown::Text(text) = token {
-    //         return text.contains("@everyone") || text.contains("@here");
-    //     }
-    // }
-    //
-    // return false;
-}
+//{
+// // fast exit so we don't have to parse the entire thing
+// if !content.contains("@everyone") && !content.contains("@here") {
+//     return false;
+// }
+//
+// let tokens = parse_discord_markdown(content);
+// for token in tokens {
+//     if let DiscordMarkdown::Text(text) = token {
+//         return text.contains("@everyone") || text.contains("@here");
+//     }
+// }
+//
+// return false;
+//}
 
 // #[derive(Clone, Debug)]
 // pub enum DiscordMarkdown {
